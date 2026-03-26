@@ -29,6 +29,7 @@ def load_model(checkpoint_path, args, cat_dict, col_dict, fab_dict):
         gpu_num=args.gpu_num,
         map_location=f"cuda:{args.gpu_num}" if torch.cuda.is_available() else "cpu",
         weights_only=False,
+        strict=False,
     )
     model.eval()
     return model
