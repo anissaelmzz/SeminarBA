@@ -127,6 +127,7 @@ class RetrievalAugmentedGTM(GTM):
             }
         )
 
+
     def on_validation_epoch_end(self):
         if len(self.validation_outputs) == 0:
             return
