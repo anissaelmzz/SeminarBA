@@ -109,24 +109,37 @@ class RetrievalAugmentedGTM(GTM):
         self.log("train_loss", loss)
         return loss
 
-    def validation_step(self, val_batch, batch_idx):
-        item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
-        forecasted_sales, _ = self.forward(
-            category, color, fabric, temporal_features, gtrends, images, retrieval_summary
-        )
-        return item_sales.squeeze(), forecasted_sales.squeeze()
+def on_validation_epoch_start(self):
+    self.validation_outputs = []
 
-    def validation_epoch_end(self, val_step_outputs):
-        item_sales, forecasted_sales = [x[0] for x in val_step_outputs], [x[1] for x in val_step_outputs]
-        item_sales, forecasted_sales = torch.stack(item_sales), torch.stack(forecasted_sales)
+def validation_step(self, val_batch, batch_idx):
+    item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
+    forecasted_sales, _ = self.forward(
+        category, color, fabric, temporal_features, gtrends, images, retrieval_summary
+    )
 
-        rescaled_item_sales = item_sales * 1065
-        rescaled_forecasted_sales = forecasted_sales * 1065
+    self.validation_outputs.append(
+        {
+            "item_sales": item_sales.detach(),
+            "forecasted_sales": forecasted_sales.detach(),
+        }
+    )
 
-        loss = F.mse_loss(item_sales, forecasted_sales.squeeze())
-        mae = F.l1_loss(rescaled_item_sales, rescaled_forecasted_sales)
+def on_validation_epoch_end(self):
+    if len(self.validation_outputs) == 0:
+        return
 
-        self.log("val_mae", mae)
-        self.log("val_loss", loss)
+    item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
+    forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
 
-        print("Validation MAE:", mae.detach().cpu().numpy(), "LR:", self.optimizers().param_groups[0]["lr"])
+    rescaled_item_sales = item_sales * 1065
+    rescaled_forecasted_sales = forecasted_sales * 1065
+
+    loss = F.mse_loss(item_sales, forecasted_sales)
+    mae = F.l1_loss(rescaled_item_sales, rescaled_forecasted_sales)
+
+    self.log("val_mae", mae, prog_bar=True)
+    self.log("val_loss", loss, prog_bar=True)
+
+    print("Validation MAE:", mae.detach().cpu().numpy())
+    self.validation_outputs.clear()
