@@ -192,7 +192,8 @@ def run(args):
     tb_logger = pl.loggers.TensorBoardLogger(args.log_dir, name=model_savename)
 
     trainer = pl.Trainer(
-        gpus=[args.gpu_num],
+        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        devices=1,
         max_epochs=args.epochs,
         check_val_every_n_epoch=5,
         logger=tb_logger,
