@@ -9,7 +9,7 @@ class RetrievalAugmentedGTM(GTM):
     """
     Simple retrieval-augmented GTM baseline.
 
-    We reuse the original GTM encoders, then fuse the static feature
+    Reuses the original GTM encoders, then fuses the static feature
     representation with a projected retrieval summary vector.
     """
 
@@ -62,6 +62,8 @@ class RetrievalAugmentedGTM(GTM):
             nn.Dropout(0.2),
         )
 
+        self.validation_outputs = []
+
     def forward(self, category, color, fabric, temporal_features, gtrends, images, retrieval_summary):
         # Original GTM encodings
         img_encoding = self.image_encoder(images)
@@ -109,37 +111,37 @@ class RetrievalAugmentedGTM(GTM):
         self.log("train_loss", loss)
         return loss
 
-def on_validation_epoch_start(self):
-    self.validation_outputs = []
+    def on_validation_epoch_start(self):
+        self.validation_outputs = []
 
-def validation_step(self, val_batch, batch_idx):
-    item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
-    forecasted_sales, _ = self.forward(
-        category, color, fabric, temporal_features, gtrends, images, retrieval_summary
-    )
+    def validation_step(self, val_batch, batch_idx):
+        item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
+        forecasted_sales, _ = self.forward(
+            category, color, fabric, temporal_features, gtrends, images, retrieval_summary
+        )
 
-    self.validation_outputs.append(
-        {
-            "item_sales": item_sales.detach(),
-            "forecasted_sales": forecasted_sales.detach(),
-        }
-    )
+        self.validation_outputs.append(
+            {
+                "item_sales": item_sales.detach(),
+                "forecasted_sales": forecasted_sales.detach(),
+            }
+        )
 
-def on_validation_epoch_end(self):
-    if len(self.validation_outputs) == 0:
-        return
+    def on_validation_epoch_end(self):
+        if len(self.validation_outputs) == 0:
+            return
 
-    item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
-    forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
+        item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
+        forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
 
-    rescaled_item_sales = item_sales * 1065
-    rescaled_forecasted_sales = forecasted_sales * 1065
+        rescaled_item_sales = item_sales * 1065
+        rescaled_forecasted_sales = forecasted_sales * 1065
 
-    loss = F.mse_loss(item_sales, forecasted_sales)
-    mae = F.l1_loss(rescaled_item_sales, rescaled_forecasted_sales)
+        loss = F.mse_loss(item_sales, forecasted_sales)
+        mae = F.l1_loss(rescaled_item_sales, rescaled_forecasted_sales)
 
-    self.log("val_mae", mae, prog_bar=True)
-    self.log("val_loss", loss, prog_bar=True)
+        self.log("val_mae", mae, prog_bar=True)
+        self.log("val_loss", loss, prog_bar=True)
 
-    print("Validation MAE:", mae.detach().cpu().numpy())
-    self.validation_outputs.clear()
+        print("Validation MAE:", mae.detach().cpu().numpy())
+        self.validation_outputs.clear()
