@@ -252,7 +252,6 @@ def main():
     similarity_path = Path(args.similarity_path)
     output_path = Path(args.output_path)
     neighbors_csv_path = Path(args.neighbors_csv)
-    import argparse
     from pathlib import Path
 
     import pandas as pd
