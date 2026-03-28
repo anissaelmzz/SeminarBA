@@ -65,7 +65,6 @@ class RetrievalAugmentedGTM(GTM):
         self.validation_outputs = []
 
     def forward(self, category, color, fabric, temporal_features, gtrends, images, retrieval_summary):
-        # Original GTM encodings
         img_encoding = self.image_encoder(images)
         dummy_encoding = self.dummy_encoder(temporal_features)
         text_encoding = self.text_encoder(category, color, fabric)
@@ -75,7 +74,6 @@ class RetrievalAugmentedGTM(GTM):
             img_encoding, text_encoding, dummy_encoding
         )
 
-        # Retrieval augmentation
         retrieval_emb = self.retrieval_projection(retrieval_summary)
         augmented_static = self.retrieval_fusion(
             torch.cat([static_feature_fusion, retrieval_emb], dim=1)
@@ -114,21 +112,18 @@ class RetrievalAugmentedGTM(GTM):
     def on_validation_epoch_start(self):
         self.validation_outputs = []
 
-    def on_validation_epoch_start(self):
-        self.validation_outputs = []
+    def validation_step(self, val_batch, batch_idx):
+        item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
+        forecasted_sales, _ = self.forward(
+            category, color, fabric, temporal_features, gtrends, images, retrieval_summary
+        )
 
-        def validation_step(self, val_batch, batch_idx):
-            item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
-            forecasted_sales, _ = self.forward(
-                category, color, fabric, temporal_features, gtrends, images, retrieval_summary
-            )
-
-            self.validation_outputs.append(
-                {
-                    "item_sales": item_sales.detach(),
-                    "forecasted_sales": forecasted_sales.detach(),
-                }
-            )
+        self.validation_outputs.append(
+            {
+                "item_sales": item_sales.detach(),
+                "forecasted_sales": forecasted_sales.detach(),
+            }
+        )
 
     def on_validation_epoch_end(self):
         if len(self.validation_outputs) == 0:
@@ -148,4 +143,3 @@ class RetrievalAugmentedGTM(GTM):
 
         print("Validation MAE:", mae.detach().cpu().numpy())
         self.validation_outputs.clear()
-
