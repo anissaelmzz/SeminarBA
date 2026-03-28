@@ -114,11 +114,12 @@ class RetrievalAugmentedGTM(GTM):
     def on_validation_epoch_start(self):
         self.validation_outputs = []
 
-    def validation_step(self, val_batch, batch_idx):
-        item_sales, category, color, fabric, temporal_features, gtrends, images, retrieval_summary = val_batch
-        forecasted_sales, _ = self.forward(
-            category, color, fabric, temporal_features, gtrends, images, retrieval_summary
-        )
+    def on_validation_epoch_start(self):
+        self.validation_outputs = []
+
+    def validation_step(self, test_batch, batch_idx):
+        item_sales, category, color, fabric, temporal_features, gtrends, images = test_batch
+        forecasted_sales, _ = self.forward(category, color, fabric, temporal_features, gtrends, images)
 
         self.validation_outputs.append(
             {
@@ -126,7 +127,6 @@ class RetrievalAugmentedGTM(GTM):
                 "forecasted_sales": forecasted_sales.detach(),
             }
         )
-
 
     def on_validation_epoch_end(self):
         if len(self.validation_outputs) == 0:
@@ -146,3 +146,4 @@ class RetrievalAugmentedGTM(GTM):
 
         print("Validation MAE:", mae.detach().cpu().numpy())
         self.validation_outputs.clear()
+
