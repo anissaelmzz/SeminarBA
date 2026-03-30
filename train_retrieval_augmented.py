@@ -189,6 +189,14 @@ def run(args):
         save_top_k=1,
     )
 
+    early_stopping_callback = pl.callbacks.EarlyStopping(
+        monitor="val_wape",
+        mode="min",
+        patience=3,
+        min_delta=0.0,
+        verbose=True,
+    )
+
     tb_logger = pl.loggers.TensorBoardLogger(args.log_dir, name=model_savename)
 
     trainer = pl.Trainer(
@@ -197,7 +205,7 @@ def run(args):
         max_epochs=args.epochs,
         check_val_every_n_epoch=5,
         logger=tb_logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, early_stopping_callback],
     )
 
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
