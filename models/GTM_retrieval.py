@@ -4,12 +4,12 @@ import torch.nn.functional as F
 
 from models.GTM import GTM
 
+
 def compute_forecast_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, erp_epsilon: float = 0.1):
     """
     y_true, y_pred: shape [N, H]
     Returns scalar tensors: wape, mae, ts, erp
     """
-
     y_true = y_true.float()
     y_pred = y_pred.float()
 
@@ -32,6 +32,8 @@ def compute_forecast_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, erp_eps
     erp = erp_per_series.mean()
 
     return wape, mae, ts, erp
+
+
 class RetrievalAugmentedGTM(GTM):
     """
     Simple retrieval-augmented GTM baseline.
@@ -133,7 +135,7 @@ class RetrievalAugmentedGTM(GTM):
             category, color, fabric, temporal_features, gtrends, images, retrieval_summary
         )
         loss = F.mse_loss(item_sales, forecasted_sales)
-        self.log("train_loss", loss)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def on_validation_epoch_start(self):
@@ -152,61 +154,61 @@ class RetrievalAugmentedGTM(GTM):
             }
         )
 
-def on_validation_epoch_end(self):
-    if len(self.validation_outputs) == 0:
-        return
+    def on_validation_epoch_end(self):
+        if len(self.validation_outputs) == 0:
+            return
 
-    item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
-    forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
+        item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
+        forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
 
-    # Rescaled/original-unit versions
-    rescaled_item_sales = item_sales * 1065
-    rescaled_forecasted_sales = forecasted_sales * 1065
+        # Rescaled/original-unit versions
+        rescaled_item_sales = item_sales * 1065
+        rescaled_forecasted_sales = forecasted_sales * 1065
 
-    # Training loss stays on normalized scale
-    val_loss = F.mse_loss(item_sales, forecasted_sales)
+        # Training loss stays on normalized scale
+        val_loss = F.mse_loss(item_sales, forecasted_sales)
 
-    # Normalized metrics
-    val_wape_norm, val_mae_norm, val_ts_norm, val_erp_norm = compute_forecast_metrics(
-        item_sales,
-        forecasted_sales,
-        erp_epsilon=0.1,
-    )
+        # Normalized metrics
+        val_wape_norm, val_mae_norm, val_ts_norm, val_erp_norm = compute_forecast_metrics(
+            item_sales,
+            forecasted_sales,
+            erp_epsilon=0.1,
+        )
 
-    # Rescaled/original-unit metrics
-    val_wape, val_mae, val_ts, val_erp = compute_forecast_metrics(
-        rescaled_item_sales,
-        rescaled_forecasted_sales,
-        erp_epsilon=0.1,
-    )
+        # Rescaled/original-unit metrics
+        val_wape, val_mae, val_ts, val_erp = compute_forecast_metrics(
+            rescaled_item_sales,
+            rescaled_forecasted_sales,
+            erp_epsilon=0.1,
+        )
 
-    # Log normalized metrics
-    self.log("val_wape_norm", val_wape_norm, prog_bar=False)
-    self.log("val_mae_norm", val_mae_norm, prog_bar=False)
-    self.log("val_ts_norm", val_ts_norm, prog_bar=False)
-    self.log("val_erp_norm", val_erp_norm, prog_bar=False)
+        # Log normalized metrics
+        self.log("val_wape_norm", val_wape_norm, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log("val_mae_norm", val_mae_norm, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log("val_ts_norm", val_ts_norm, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log("val_erp_norm", val_erp_norm, on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
-    # Log rescaled metrics
-    self.log("val_loss", val_loss, prog_bar=True)
-    self.log("val_wape", val_wape, prog_bar=True)
-    self.log("val_mae", val_mae, prog_bar=True)
-    self.log("val_ts", val_ts, prog_bar=False)
-    self.log("val_erp", val_erp, prog_bar=False)
+        # Log rescaled metrics
+        self.log("val_loss", val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_wape", val_wape, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_mae", val_mae, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_ts", val_ts, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        self.log("val_erp", val_erp, on_step=False, on_epoch=True, prog_bar=False, logger=True)
 
-    print(
-        f"Validation normalized | "
-        f"MAE: {val_mae_norm.item():.3f} | "
-        f"WAPE: {val_wape_norm.item():.3f} | "
-        f"TS: {val_ts_norm.item():.3f} | "
-        f"ERP: {val_erp_norm.item():.3f}"
-    )
+        print(
+            f"Validation normalized | "
+            f"MAE: {val_mae_norm.item():.3f} | "
+            f"WAPE: {val_wape_norm.item():.3f} | "
+            f"TS: {val_ts_norm.item():.3f} | "
+            f"ERP: {val_erp_norm.item():.3f}"
+        )
 
-    print(
-        f"Validation rescaled | "
-        f"MAE: {val_mae.item():.3f} | "
-        f"WAPE: {val_wape.item():.3f} | "
-        f"TS: {val_ts.item():.3f} | "
-        f"ERP: {val_erp.item():.3f}"
-    )
+        print(
+            f"Validation rescaled | "
+            f"MAE: {val_mae.item():.3f} | "
+            f"WAPE: {val_wape.item():.3f} | "
+            f"TS: {val_ts.item():.3f} | "
+            f"ERP: {val_erp.item():.3f}"
+        )
 
-    self.validation_outputs.clear()
+        self.validation_outputs.clear()
