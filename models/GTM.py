@@ -421,12 +421,12 @@ class GTM(pl.LightningModule):
             }
         )
 
-    def on_validation_epoch_end(self):
-        if len(self.validation_outputs) == 0:
-            return
+def on_validation_epoch_end(self):
+    if len(self.validation_outputs) == 0:
+        return
 
-        item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
-        forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
+    item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
+    forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
 
     rescaled_item_sales = item_sales * 1065
     rescaled_forecasted_sales = forecasted_sales * 1065
