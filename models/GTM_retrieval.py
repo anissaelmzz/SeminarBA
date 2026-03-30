@@ -4,7 +4,35 @@ import torch.nn.functional as F
 
 from models.GTM import GTM
 
+def compute_forecast_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, erp_epsilon: float = 0.1):
+    """
+    y_true, y_pred: shape [N, H]
+    Returns scalar tensors: wape, mae, ts, erp
+    """
 
+    # Safety
+    y_true = y_true.float()
+    y_pred = y_pred.float()
+
+    abs_err = torch.abs(y_true - y_pred)
+
+    # MAE
+    mae = abs_err.mean()
+
+    # WAPE
+    denom = y_true.sum().clamp(min=1e-12)
+    wape = 100.0 * abs_err.sum() / denom
+
+    # Tracking Signal (TS)
+    ts = (y_true - y_pred).sum() / mae.clamp(min=1e-12)
+
+    # ERP-style mismatch count over time
+    # For univariate equal-length sequences, this follows the paper's description:
+    # d_t = 0 if |yhat_t - y_t| < epsilon else 1, then sum over time.
+    erp_per_series = (abs_err >= erp_epsilon).float().sum(dim=1)
+    erp = erp_per_series.mean()
+
+    return wape, mae, ts, erp
 class RetrievalAugmentedGTM(GTM):
     """
     Simple retrieval-augmented GTM baseline.
@@ -135,11 +163,25 @@ class RetrievalAugmentedGTM(GTM):
         rescaled_item_sales = item_sales * 1065
         rescaled_forecasted_sales = forecasted_sales * 1065
 
-        loss = F.mse_loss(item_sales, forecasted_sales)
-        mae = F.l1_loss(rescaled_item_sales, rescaled_forecasted_sales)
+        val_loss = F.mse_loss(item_sales, forecasted_sales)
 
-        self.log("val_mae", mae, prog_bar=True)
-        self.log("val_loss", loss, prog_bar=True)
+        val_wape, val_mae, val_ts, val_erp = compute_forecast_metrics(
+            rescaled_item_sales,
+            rescaled_forecasted_sales,
+            erp_epsilon=0.1,
+        )
 
-        print("Validation MAE:", mae.detach().cpu().numpy())
+        self.log("val_loss", val_loss, prog_bar=True)
+        self.log("val_wape", val_wape, prog_bar=True)
+        self.log("val_mae", val_mae, prog_bar=True)
+        self.log("val_ts", val_ts, prog_bar=False)
+        self.log("val_erp", val_erp, prog_bar=False)
+
+        print(
+            f"Validation | MAE: {val_mae.item():.3f} | "
+            f"WAPE: {val_wape.item():.3f} | "
+            f"TS: {val_ts.item():.3f} | "
+            f"ERP: {val_erp.item():.3f}"
+        )
+
         self.validation_outputs.clear()
