@@ -153,35 +153,61 @@ class RetrievalAugmentedGTM(GTM):
             }
         )
 
-    def on_validation_epoch_end(self):
-        if len(self.validation_outputs) == 0:
-            return
+def on_validation_epoch_end(self):
+    if len(self.validation_outputs) == 0:
+        return
 
-        item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
-        forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
+    item_sales = torch.cat([x["item_sales"] for x in self.validation_outputs], dim=0)
+    forecasted_sales = torch.cat([x["forecasted_sales"] for x in self.validation_outputs], dim=0)
 
-        rescaled_item_sales = item_sales * 1065
-        rescaled_forecasted_sales = forecasted_sales * 1065
+    # Rescaled/original-unit versions
+    rescaled_item_sales = item_sales * 1065
+    rescaled_forecasted_sales = forecasted_sales * 1065
 
-        val_loss = F.mse_loss(item_sales, forecasted_sales)
+    # Training loss stays on normalized scale
+    val_loss = F.mse_loss(item_sales, forecasted_sales)
 
-        val_wape, val_mae, val_ts, val_erp = compute_forecast_metrics(
-            rescaled_item_sales,
-            rescaled_forecasted_sales,
-            erp_epsilon=0.1,
-        )
+    # Normalized metrics
+    val_wape_norm, val_mae_norm, val_ts_norm, val_erp_norm = compute_forecast_metrics(
+        item_sales,
+        forecasted_sales,
+        erp_epsilon=0.1,
+    )
 
-        self.log("val_loss", val_loss, prog_bar=True)
-        self.log("val_wape", val_wape, prog_bar=True)
-        self.log("val_mae", val_mae, prog_bar=True)
-        self.log("val_ts", val_ts, prog_bar=False)
-        self.log("val_erp", val_erp, prog_bar=False)
+    # Rescaled/original-unit metrics
+    val_wape, val_mae, val_ts, val_erp = compute_forecast_metrics(
+        rescaled_item_sales,
+        rescaled_forecasted_sales,
+        erp_epsilon=0.1,
+    )
 
-        print(
-            f"Validation | MAE: {val_mae.item():.3f} | "
-            f"WAPE: {val_wape.item():.3f} | "
-            f"TS: {val_ts.item():.3f} | "
-            f"ERP: {val_erp.item():.3f}"
-        )
+    # Log normalized metrics
+    self.log("val_wape_norm", val_wape_norm, prog_bar=False)
+    self.log("val_mae_norm", val_mae_norm, prog_bar=False)
+    self.log("val_ts_norm", val_ts_norm, prog_bar=False)
+    self.log("val_erp_norm", val_erp_norm, prog_bar=False)
 
-        self.validation_outputs.clear()
+    # Log rescaled metrics
+    self.log("val_loss", val_loss, prog_bar=True)
+    self.log("val_wape", val_wape, prog_bar=True)
+    self.log("val_mae", val_mae, prog_bar=True)
+    self.log("val_ts", val_ts, prog_bar=False)
+    self.log("val_erp", val_erp, prog_bar=False)
+
+    print(
+        f"Validation normalized | "
+        f"MAE: {val_mae_norm.item():.3f} | "
+        f"WAPE: {val_wape_norm.item():.3f} | "
+        f"TS: {val_ts_norm.item():.3f} | "
+        f"ERP: {val_erp_norm.item():.3f}"
+    )
+
+    print(
+        f"Validation rescaled | "
+        f"MAE: {val_mae.item():.3f} | "
+        f"WAPE: {val_wape.item():.3f} | "
+        f"TS: {val_ts.item():.3f} | "
+        f"ERP: {val_erp.item():.3f}"
+    )
+
+    self.validation_outputs.clear()
