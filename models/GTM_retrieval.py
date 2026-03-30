@@ -10,25 +10,24 @@ def compute_forecast_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, erp_eps
     Returns scalar tensors: wape, mae, ts, erp
     """
 
-    # Safety
     y_true = y_true.float()
     y_pred = y_pred.float()
 
     abs_err = torch.abs(y_true - y_pred)
 
-    # MAE
+    # Global MAE and WAPE
     mae = abs_err.mean()
+    wape = 100.0 * abs_err.sum() / y_true.sum().clamp(min=1e-12)
 
-    # WAPE
-    denom = y_true.sum().clamp(min=1e-12)
-    wape = 100.0 * abs_err.sum() / denom
+    # Per-series MAE: shape [N]
+    mae_per_series = abs_err.mean(dim=1).clamp(min=1e-12)
 
-    # Tracking Signal (TS)
-    ts = (y_true - y_pred).sum() / mae.clamp(min=1e-12)
+    # Per-series TS, then average
+    signed_error_per_series = (y_true - y_pred).sum(dim=1)
+    ts_per_series = signed_error_per_series / mae_per_series
+    ts = ts_per_series.mean()
 
-    # ERP-style mismatch count over time
-    # For univariate equal-length sequences, this follows the paper's description:
-    # d_t = 0 if |yhat_t - y_t| < epsilon else 1, then sum over time.
+    # Per-series ERP, then average
     erp_per_series = (abs_err >= erp_epsilon).float().sum(dim=1)
     erp = erp_per_series.mean()
 

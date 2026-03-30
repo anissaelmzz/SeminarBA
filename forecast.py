@@ -16,13 +16,18 @@ def compute_forecast_metrics_np(y_true, y_pred, erp_epsilon=0.1):
 
     mae = abs_err.mean()
     wape = 100.0 * abs_err.sum() / max(y_true.sum(), 1e-12)
-    ts = (y_true - y_pred).sum() / max(mae, 1e-12)
+
+    mae_per_series = abs_err.mean(axis=1)
+    mae_per_series = np.maximum(mae_per_series, 1e-12)
+
+    signed_error_per_series = (y_true - y_pred).sum(axis=1)
+    ts_per_series = signed_error_per_series / mae_per_series
+    ts = ts_per_series.mean()
 
     erp_per_series = (abs_err >= erp_epsilon).sum(axis=1)
     erp = erp_per_series.mean()
 
     return round(wape, 3), round(mae, 3), round(ts, 3), round(erp, 3)
-
 
 def print_error_metrics(y_true, y_pred, rescaled_y_true, rescaled_y_pred):
     wape, mae, ts, erp = compute_forecast_metrics_np(y_true, y_pred)
