@@ -161,7 +161,7 @@ if __name__ == '__main__':
     # Instead of using the output_dim for the model and for the evaluation we split this such that you do not change
     # the model when having two different values
     parser.add_argument('--model_output_dim', type=int, default=12)
-    parser.add_argument('--eval_horizon', type=int, default=12)
+    parser.add_argument('--eval_horizon', type=int, default=6)
 
     parser.add_argument('--use_encoder_mask', type=int, default=1)
     parser.add_argument('--autoregressive', type=int, default=0)

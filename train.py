@@ -94,7 +94,7 @@ def run(args):
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
         dirpath=args.log_dir + '/'+args.model_type,
         filename=model_savename+'---{epoch}---'+dt_string,
-        monitor='val_mae',
+        monitor='val_wape',
         mode='min',
         save_top_k=1
     )
