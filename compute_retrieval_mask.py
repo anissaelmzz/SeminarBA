@@ -75,7 +75,7 @@ def build_retrieval_mask(
     """
     Build binary retrieval mask:
 
-        m_ij^retr = 1[d_j + H <= d_i] * 1[split_j == candidate_split_value]
+        m_ij^retr = 1[d_j + H <= d_i] * 1[split_j == candidate_split_value] * 1[i != j]
 
     Rows i = query/target products
     Columns j = candidate historical products
@@ -90,29 +90,25 @@ def build_retrieval_mask(
     if release_dates.isna().any():
         raise ValueError("Some release_date values are missing or invalid.")
 
-    # d_i as column vector, d_j as row vector
     d_i = release_dates.values[:, None]
     d_j = release_dates.values[None, :]
-
     horizon = pd.to_timedelta(horizon_weeks * 7, unit="D")
 
-    # Temporal admissibility
     temporal_mask_np = (d_j + horizon) <= d_i
-
-    # Candidate restriction: only subtrain items may be retrieved
     candidate_mask_np = (metadata[split_col].values == candidate_split_value)[None, :]
 
     admissible_np = temporal_mask_np & candidate_mask_np
     retrieval_mask = torch.from_numpy(admissible_np)
 
+    # Never retrieve self.
+    retrieval_mask.fill_diagonal_(False)
     return retrieval_mask
 
 
 def apply_retrieval_mask(cosine_sim: torch.Tensor, retrieval_mask: torch.Tensor) -> torch.Tensor:
     """
-    Apply retrieval mask to similarity matrix.
-
-    Inadmissible pairs are set to -inf so they cannot appear in top-k retrieval.
+    Apply admissibility mask to similarity matrix.
+    Inadmissible pairs are set to -inf.
     """
     if cosine_sim.shape != retrieval_mask.shape:
         raise ValueError(
@@ -122,20 +118,31 @@ def apply_retrieval_mask(cosine_sim: torch.Tensor, retrieval_mask: torch.Tensor)
 
     masked_sim = cosine_sim.clone()
     masked_sim[~retrieval_mask] = -float("inf")
-
     return masked_sim
 
 
-def compute_topk_admissible_neighbors(masked_sim: torch.Tensor, k: int):
+def apply_similarity_threshold(masked_sim: torch.Tensor, similarity_threshold: float) -> torch.Tensor:
     """
-    Compute top-k admissible historical neighbors per product.
+    Keep only admissible neighbors whose cosine similarity is above threshold.
+    Non-qualifying pairs are set to -inf.
     """
-    if k >= masked_sim.shape[0]:
-        raise ValueError(f"k must be smaller than number of products ({masked_sim.shape[0]}).")
+    thresholded_sim = masked_sim.clone()
+    below_threshold = torch.isfinite(thresholded_sim) & (thresholded_sim < similarity_threshold)
+    thresholded_sim[below_threshold] = -float("inf")
+    return thresholded_sim
 
-    topk_scores, topk_indices = torch.topk(masked_sim, k=k, dim=1)
+
+def compute_thresholded_neighbors(similarity_tensor: torch.Tensor, max_k: int):
+    """
+    Retrieve up to max_k neighbors per row after admissibility + thresholding.
+    Invalid slots remain -inf and are tracked via valid_mask.
+    """
+    if max_k <= 0:
+        raise ValueError("max_k must be positive.")
+
+    safe_k = min(max_k, similarity_tensor.shape[1])
+    topk_scores, topk_indices = torch.topk(similarity_tensor, k=safe_k, dim=1)
     valid_mask = torch.isfinite(topk_scores)
-
     return topk_scores, topk_indices, valid_mask
 
 
@@ -145,10 +152,8 @@ def build_admissible_neighbors_dataframe(
     topk_indices: torch.Tensor,
     valid_mask: torch.Tensor,
     horizon_weeks: int,
+    similarity_threshold: float,
 ) -> pd.DataFrame:
-    """
-    Build readable CSV of admissible retrieval neighbors.
-    """
     rows = []
     k = topk_scores.shape[1]
 
@@ -162,8 +167,9 @@ def build_admissible_neighbors_dataframe(
             row = {
                 "query_index": i,
                 "rank": rank + 1,
-                "is_admissible_neighbor": is_valid,
+                "is_selected_neighbor": is_valid,
                 "forecast_horizon_weeks": horizon_weeks,
+                "similarity_threshold": similarity_threshold,
             }
 
             if "external_code" in metadata.columns:
@@ -176,7 +182,7 @@ def build_admissible_neighbors_dataframe(
                 score = float(topk_scores[i, rank].item())
 
                 row["neighbor_index"] = neighbor_idx
-                row["masked_cosine_similarity"] = score
+                row["cosine_similarity"] = score
                 row["neighbor_release_date"] = neighbor_release_date
                 row["neighbor_plus_horizon_date"] = neighbor_release_date + pd.to_timedelta(
                     horizon_weeks * 7, unit="D"
@@ -192,7 +198,7 @@ def build_admissible_neighbors_dataframe(
                     row["neighbor_category"] = metadata.loc[neighbor_idx, "category"]
             else:
                 row["neighbor_index"] = None
-                row["masked_cosine_similarity"] = None
+                row["cosine_similarity"] = None
                 row["neighbor_release_date"] = None
                 row["neighbor_plus_horizon_date"] = None
                 row["days_between_launches"] = None
@@ -212,44 +218,15 @@ def build_admissible_neighbors_dataframe(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute retrieval admissibility mask and top-k admissible neighbors."
+        description="Apply admissibility mask and cosine-similarity threshold for retrieval."
     )
-    parser.add_argument(
-        "--embeddings_path",
-        type=str,
-        required=True,
-        help="Path to multimodal_embeddings.pt"
-    )
-    parser.add_argument(
-        "--similarity_path",
-        type=str,
-        required=True,
-        help="Path to cosine_similarities.pt"
-    )
-    parser.add_argument(
-        "--output_path",
-        type=str,
-        required=True,
-        help="Path to save masked retrieval output .pt file"
-    )
-    parser.add_argument(
-        "--neighbors_csv",
-        type=str,
-        required=True,
-        help="Path to save admissible neighbors CSV"
-    )
-    parser.add_argument(
-        "--horizon_weeks",
-        type=int,
-        default=12,
-        help="Forecast horizon H in weeks"
-    )
-    parser.add_argument(
-        "--k",
-        type=int,
-        default=20,
-        help="Number of admissible neighbors to retrieve per product"
-    )
+    parser.add_argument("--embeddings_path", type=str, required=True, help="Path to multimodal_embeddings.pt")
+    parser.add_argument("--similarity_path", type=str, required=True, help="Path to cosine_similarities.pt")
+    parser.add_argument("--output_path", type=str, required=True, help="Path to save thresholded retrieval output .pt file")
+    parser.add_argument("--neighbors_csv", type=str, required=True, help="Path to save selected neighbors CSV")
+    parser.add_argument("--horizon_weeks", type=int, default=12, help="Forecast horizon H in weeks")
+    parser.add_argument("--similarity_threshold", type=float, required=True, help="Minimum cosine similarity required for retrieval")
+    parser.add_argument("--max_k", type=int, default=20, help="Maximum number of retrieved neighbors to keep per product")
 
     args = parser.parse_args()
 
@@ -283,28 +260,33 @@ def main():
     print(f"Retrieval mask shape: {tuple(retrieval_mask.shape)}")
 
     masked_sim = apply_retrieval_mask(cosine_sim, retrieval_mask)
+    thresholded_sim = apply_similarity_threshold(masked_sim, args.similarity_threshold)
 
-    topk_scores, topk_indices, valid_mask = compute_topk_admissible_neighbors(
-        masked_sim, k=args.k
+    topk_scores, topk_indices, valid_mask = compute_thresholded_neighbors(
+        thresholded_sim, max_k=args.max_k
     )
 
-    print(f"Top-{args.k} admissible scores shape: {tuple(topk_scores.shape)}")
-    print(f"Top-{args.k} admissible indices shape: {tuple(topk_indices.shape)}")
+    print(f"Selected-neighbor scores shape: {tuple(topk_scores.shape)}")
+    print(f"Selected-neighbor indices shape: {tuple(topk_indices.shape)}")
+    print(f"Queries with zero valid neighbors: {int((~valid_mask).all(dim=1).sum().item())}")
 
     output = {
         "retrieval_mask": retrieval_mask,
         "masked_retrieval_similarity": masked_sim,
+        "thresholded_retrieval_similarity": thresholded_sim,
         "topk_scores": topk_scores,
         "topk_indices": topk_indices,
         "topk_valid_mask": valid_mask,
         "metadata": metadata,
         "horizon_weeks": args.horizon_weeks,
-        "k": args.k,
+        "similarity_threshold": args.similarity_threshold,
+        "k": topk_scores.shape[1],
+        "max_k": args.max_k,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(output, output_path)
-    print(f"Saved masked retrieval output to: {output_path}")
+    print(f"Saved thresholded retrieval output to: {output_path}")
 
     neighbors_df = build_admissible_neighbors_dataframe(
         metadata=metadata,
@@ -312,11 +294,12 @@ def main():
         topk_indices=topk_indices,
         valid_mask=valid_mask,
         horizon_weeks=args.horizon_weeks,
+        similarity_threshold=args.similarity_threshold,
     )
 
     neighbors_csv_path.parent.mkdir(parents=True, exist_ok=True)
     neighbors_df.to_csv(neighbors_csv_path, index=False)
-    print(f"Saved admissible neighbors CSV to: {neighbors_csv_path}")
+    print(f"Saved selected neighbors CSV to: {neighbors_csv_path}")
 
     total_pairs = retrieval_mask.numel()
     admissible_pairs = int(retrieval_mask.sum().item())

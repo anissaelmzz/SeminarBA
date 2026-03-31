@@ -40,14 +40,20 @@ def print_error_metrics(y_true, y_pred, rescaled_y_true, rescaled_y_pred):
 
 
 class RetrievalAugmentedDataset(Dataset):
-    def __init__(self, base_dataset, retrieval_tensor):
+    def __init__(self, base_dataset, retrieval_curve_tensor, retrieval_available_tensor):
         self.base_dataset = base_dataset
-        self.retrieval_tensor = retrieval_tensor
+        self.retrieval_curve_tensor = retrieval_curve_tensor
+        self.retrieval_available_tensor = retrieval_available_tensor
 
-        if len(self.base_dataset) != len(self.retrieval_tensor):
+        if len(self.base_dataset) != len(self.retrieval_curve_tensor):
             raise ValueError(
                 f"Length mismatch: base dataset has {len(self.base_dataset)} rows, "
-                f"retrieval tensor has {len(self.retrieval_tensor)} rows."
+                f"retrieval tensor has {len(self.retrieval_curve_tensor)} rows."
+            )
+        if len(self.base_dataset) != len(self.retrieval_available_tensor):
+            raise ValueError(
+                f"Length mismatch: base dataset has {len(self.base_dataset)} rows, "
+                f"retrieval availability tensor has {len(self.retrieval_available_tensor)} rows."
             )
 
     def __len__(self):
@@ -55,13 +61,15 @@ class RetrievalAugmentedDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.base_dataset[idx]
-        retrieval_summary = self.retrieval_tensor[idx]
-        return (*item, retrieval_summary)
+        retrieval_curve = self.retrieval_curve_tensor[idx]
+        retrieval_available = self.retrieval_available_tensor[idx]
+        return (*item, retrieval_curve, retrieval_available)
 
 
-def build_retrieval_tensor_for_dataframe(df, retrieval_memory):
+def build_retrieval_tensors_for_dataframe(df, retrieval_memory):
     metadata = retrieval_memory["metadata"]
-    retrieval_summary = retrieval_memory["retrieval_summary"]
+    retrieval_curve = retrieval_memory["retrieval_curve"]
+    retrieval_available = retrieval_memory["retrieval_available"]
 
     if "external_code" not in df.columns:
         raise KeyError("Input dataframe must contain 'external_code'.")
@@ -81,12 +89,12 @@ def build_retrieval_tensor_for_dataframe(df, retrieval_memory):
     if merged["retrieval_row"].isna().any():
         missing_codes = merged.loc[merged["retrieval_row"].isna(), "external_code"].tolist()
         raise ValueError(
-            f"Missing retrieval summary for {len(missing_codes)} products. "
+            f"Missing retrieval data for {len(missing_codes)} products. "
             f"Examples: {missing_codes[:10]}"
         )
 
     row_idx = torch.tensor(merged["retrieval_row"].astype(int).values, dtype=torch.long)
-    return retrieval_summary[row_idx]
+    return retrieval_curve[row_idx], retrieval_available[row_idx]
 
 
 def build_loader_with_retrieval(df, img_root, gtrends, cat_dict, col_dict, fab_dict,
@@ -100,22 +108,18 @@ def build_loader_with_retrieval(df, img_root, gtrends, cat_dict, col_dict, fab_d
         cat_dict,
         col_dict,
         fab_dict,
-        trend_len
+        trend_len,
     ).preprocess_data()
 
-    retrieval_tensor = build_retrieval_tensor_for_dataframe(df, retrieval_memory)
+    retrieval_curve_tensor, retrieval_available_tensor = build_retrieval_tensors_for_dataframe(df, retrieval_memory)
 
     augmented_dataset = RetrievalAugmentedDataset(
         base_dataset=zero_shot_dataset,
-        retrieval_tensor=retrieval_tensor
+        retrieval_curve_tensor=retrieval_curve_tensor,
+        retrieval_available_tensor=retrieval_available_tensor,
     )
 
-    return DataLoader(
-        augmented_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=0
-    )
+    return DataLoader(augmented_dataset, batch_size=1, shuffle=False, num_workers=0)
 
 
 def run(args):
@@ -124,22 +128,15 @@ def run(args):
     device = torch.device(f"cuda:{args.gpu_num}" if torch.cuda.is_available() else "cpu")
     pl.seed_everything(args.seed)
 
-    # Load test data
     test_df = pd.read_csv(Path(args.data_folder) / "test.csv", parse_dates=["release_date"])
     item_codes = test_df["external_code"].values
 
-    # Load encodings
     cat_dict = torch.load(Path(args.data_folder) / "category_labels.pt", weights_only=False)
     col_dict = torch.load(Path(args.data_folder) / "color_labels.pt", weights_only=False)
     fab_dict = torch.load(Path(args.data_folder) / "fabric_labels.pt", weights_only=False)
-
-    # Load Google Trends
     gtrends = pd.read_csv(Path(args.data_folder) / "gtrends.csv", index_col=[0], parse_dates=True)
-
-    # Load retrieval memory
     retrieval_memory = torch.load(args.retrieval_memory_path, map_location="cpu", weights_only=False)
 
-    # Build loader
     test_loader = build_loader_with_retrieval(
         df=test_df,
         img_root=Path(args.data_folder) / "images",
@@ -151,7 +148,6 @@ def run(args):
         retrieval_memory=retrieval_memory,
     )
 
-    # Build model
     model = RetrievalAugmentedGTM(
         embedding_dim=args.embedding_dim,
         hidden_dim=args.hidden_dim,
@@ -182,7 +178,7 @@ def run(args):
     for test_data in tqdm(test_loader, total=len(test_loader), ascii=True):
         with torch.no_grad():
             test_data = [tensor.to(device) for tensor in test_data]
-            item_sales, category, color, fabric, temporal_features, gtrends_batch, images, retrieval_summary = test_data
+            item_sales, category, color, fabric, temporal_features, gtrends_batch, images, retrieval_curve, retrieval_available = test_data
 
             y_pred, att = model(
                 category,
@@ -191,7 +187,8 @@ def run(args):
                 temporal_features,
                 gtrends_batch,
                 images,
-                retrieval_summary
+                retrieval_curve,
+                retrieval_available,
             )
 
             y_pred_np = y_pred.detach().cpu().numpy().reshape(-1)
@@ -205,7 +202,6 @@ def run(args):
     gt = np.array(gt)
     attns = np.stack(attns)
 
-    # Rescale
     scale = float(np.load(Path(args.data_folder) / "normalization_scale.npy"))
     rescale_vals = np.full(args.eval_horizon, scale, dtype=np.float32)
 
@@ -223,21 +219,19 @@ def run(args):
             "codes": item_codes.tolist(),
             "attns": attns,
         },
-        Path("results") / f"{model_savename}.pth"
+        Path("results") / f"{model_savename}.pth",
     )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Retrieval-augmented sales forecasting")
 
-    # General arguments
     parser.add_argument("--data_folder", type=str, default="dataset/")
     parser.add_argument("--retrieval_memory_path", type=str, required=True)
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--gpu_num", type=int, default=0)
     parser.add_argument("--seed", type=int, default=21)
 
-    # Model args
     parser.add_argument("--use_img", type=int, default=1)
     parser.add_argument("--use_text", type=int, default=1)
     parser.add_argument("--trend_len", type=int, default=52)
@@ -250,7 +244,6 @@ if __name__ == "__main__":
     parser.add_argument("--autoregressive", type=int, default=0)
     parser.add_argument("--num_attn_heads", type=int, default=4)
     parser.add_argument("--num_hidden_layers", type=int, default=1)
-
     parser.add_argument("--wandb_run", type=str, default="retrieval_run")
 
     args = parser.parse_args()

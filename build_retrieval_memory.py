@@ -7,9 +7,7 @@ import torch
 
 
 def load_retrieval_output(input_path: str):
-    """
-    Load retrieval output produced by compute_retrieval_mask.py.
-    """
+    """Load retrieval output produced by compute_retrieval_mask.py."""
     data = torch.load(input_path, map_location="cpu", weights_only=False)
 
     required_keys = [
@@ -24,11 +22,7 @@ def load_retrieval_output(input_path: str):
         if key not in data:
             raise KeyError(f"Missing key '{key}' in retrieval output file.")
 
-    topk_scores = data["topk_scores"]
-    topk_indices = data["topk_indices"]
-    topk_valid_mask = data["topk_valid_mask"]
     metadata = data["metadata"]
-
     if not isinstance(metadata, pd.DataFrame):
         raise TypeError("'metadata' must be a pandas DataFrame.")
 
@@ -36,15 +30,6 @@ def load_retrieval_output(input_path: str):
 
 
 def load_sales_table(csv_paths, horizon: int, explicit_sales_cols=None):
-    """
-    Load one or more CSV files and extract the sales trajectory columns.
-
-    Recommended case:
-    - sales columns are '0', '1', ..., '11'
-
-    If explicit_sales_cols is None, the script first tries ['0', ..., str(horizon-1)].
-    If those are not present, it falls back to the first `horizon` columns.
-    """
     dfs = []
     for path in csv_paths:
         df = pd.read_csv(path, parse_dates=["release_date"])
@@ -70,17 +55,12 @@ def load_sales_table(csv_paths, horizon: int, explicit_sales_cols=None):
 
     keep_cols = ["external_code", "release_date"] + sales_cols
     keep_cols = [col for col in keep_cols if col in sales_df.columns]
-
     sales_df = sales_df[keep_cols].copy()
     sales_df = sales_df.drop_duplicates(subset=["external_code"]).reset_index(drop=True)
-
     return sales_df, sales_cols
 
 
 def align_sales_to_metadata(metadata: pd.DataFrame, sales_df: pd.DataFrame, sales_cols):
-    """
-    Align sales trajectories to the exact product order of retrieval metadata.
-    """
     if "external_code" not in metadata.columns:
         raise KeyError("Metadata must contain 'external_code'.")
 
@@ -98,23 +78,12 @@ def align_sales_to_metadata(metadata: pd.DataFrame, sales_df: pd.DataFrame, sale
             f"Examples: {missing_codes[:10]}"
         )
 
-    sales_tensor = torch.tensor(merged[sales_cols].values, dtype=torch.float32)
-    return sales_tensor
+    return torch.tensor(merged[sales_cols].values, dtype=torch.float32)
 
 
-def build_neighbor_sales_tensor(
-    sales_tensor: torch.Tensor,
-    topk_indices: torch.Tensor,
-    topk_valid_mask: torch.Tensor,
-):
-    """
-    Construct neighbor sales tensor of shape [N, K, H].
-
-    Invalid top-k slots are filled with zeros.
-    """
+def build_neighbor_sales_tensor(sales_tensor: torch.Tensor, topk_indices: torch.Tensor, topk_valid_mask: torch.Tensor):
     n, k = topk_indices.shape
     h = sales_tensor.shape[1]
-
     neighbor_sales = torch.zeros((n, k, h), dtype=torch.float32)
 
     for i in range(n):
@@ -128,44 +97,35 @@ def build_neighbor_sales_tensor(
 
 def compute_similarity_weights(topk_scores: torch.Tensor, topk_valid_mask: torch.Tensor):
     """
-    Compute normalized similarity weights over valid retrieved neighbors.
-
+    Normalize valid similarity scores into weights.
     Invalid slots receive weight 0.
+    If a row has no valid neighbors, all weights are 0.
     """
-    masked_scores = topk_scores.clone()
-    masked_scores[~topk_valid_mask] = -float("inf")
+    weights = torch.zeros_like(topk_scores, dtype=torch.float32)
 
-    weights = torch.softmax(masked_scores, dim=1)
-    weights[~topk_valid_mask] = 0.0
+    for i in range(topk_scores.shape[0]):
+        valid = topk_valid_mask[i]
+        if not valid.any():
+            continue
 
-    row_sums = weights.sum(dim=1, keepdim=True).clamp(min=1e-12)
-    weights = weights / row_sums
+        valid_scores = topk_scores[i, valid].float().clamp(min=0.0)
+        score_sum = valid_scores.sum()
 
-    # If a query has zero valid neighbors, force all weights to 0
-    no_valid = (~topk_valid_mask).all(dim=1)
-    if no_valid.any():
-        weights[no_valid] = 0.0
+        if score_sum <= 1e-12:
+            weights[i, valid] = 1.0 / valid_scores.numel()
+        else:
+            weights[i, valid] = valid_scores / score_sum
 
     return weights
 
 
 def aggregate_neighbor_sales(neighbor_sales: torch.Tensor, similarity_weights: torch.Tensor):
-    """
-    Compute weighted average retrieved sales trajectory.
-
-    neighbor_sales: [N, K, H]
-    similarity_weights: [N, K]
-    returns: [N, H]
-    """
-    weights_expanded = similarity_weights.unsqueeze(-1)  # [N, K, 1]
-    retrieval_summary = (neighbor_sales * weights_expanded).sum(dim=1)
-    return retrieval_summary
+    weights_expanded = similarity_weights.unsqueeze(-1)
+    retrieval_curve = (neighbor_sales * weights_expanded).sum(dim=1)
+    return retrieval_curve
 
 
 def build_neighbor_code_table(metadata: pd.DataFrame, topk_indices: torch.Tensor, topk_valid_mask: torch.Tensor):
-    """
-    Build [N, K] array of neighbor external codes for interpretability.
-    """
     if "external_code" not in metadata.columns:
         return None
 
@@ -185,38 +145,23 @@ def build_neighbor_code_table(metadata: pd.DataFrame, topk_indices: torch.Tensor
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build explicit retrieval memory from admissible neighbors.")
-    parser.add_argument(
-        "--retrieval_path",
-        type=str,
-        required=True,
-        help="Path to retrieval_masked_similarity_k?.pt"
-    )
+    parser = argparse.ArgumentParser(description="Build weighted retrieved sales curves from selected neighbors.")
+    parser.add_argument("--retrieval_path", type=str, required=True, help="Path to thresholded retrieval output .pt")
     parser.add_argument(
         "--sales_csv_paths",
         type=str,
         nargs="+",
         required=True,
-        help="One or more CSV files containing sales trajectories, e.g. train.csv test.csv"
+        help="One or more CSV files containing sales trajectories, e.g. train.csv test.csv",
     )
-    parser.add_argument(
-        "--output_path",
-        type=str,
-        required=True,
-        help="Path to save retrieval memory .pt file"
-    )
-    parser.add_argument(
-        "--horizon",
-        type=int,
-        default=12,
-        help="Sales horizon to retrieve"
-    )
+    parser.add_argument("--output_path", type=str, required=True, help="Path to save retrieval memory .pt file")
+    parser.add_argument("--horizon", type=int, default=12, help="Sales horizon to retrieve")
     parser.add_argument(
         "--sales_cols",
         type=str,
         nargs="+",
         default=None,
-        help="Optional explicit list of sales columns, e.g. 0 1 2 3 4 5 6 7 8 9 10 11"
+        help="Optional explicit list of sales columns, e.g. 0 1 2 ... 11",
     )
 
     args = parser.parse_args()
@@ -239,12 +184,7 @@ def main():
 
     print(f"Using sales columns: {sales_cols}")
 
-    sales_tensor = align_sales_to_metadata(
-        metadata=metadata,
-        sales_df=sales_df,
-        sales_cols=sales_cols,
-    )
-
+    sales_tensor = align_sales_to_metadata(metadata=metadata, sales_df=sales_df, sales_cols=sales_cols)
     print(f"Aligned sales tensor shape: {tuple(sales_tensor.shape)}")
 
     neighbor_sales = build_neighbor_sales_tensor(
@@ -258,10 +198,11 @@ def main():
         topk_valid_mask=topk_valid_mask,
     )
 
-    retrieval_summary = aggregate_neighbor_sales(
+    retrieval_curve = aggregate_neighbor_sales(
         neighbor_sales=neighbor_sales,
         similarity_weights=similarity_weights,
     )
+    retrieval_available = topk_valid_mask.any(dim=1)
 
     neighbor_codes = build_neighbor_code_table(
         metadata=metadata,
@@ -270,14 +211,15 @@ def main():
     )
 
     output = {
-        "query_sales": sales_tensor,                    # [N, H]
-        "neighbor_sales": neighbor_sales,               # [N, K, H]
-        "topk_scores": topk_scores,                     # [N, K]
-        "topk_indices": topk_indices,                   # [N, K]
-        "topk_valid_mask": topk_valid_mask,             # [N, K]
-        "similarity_weights": similarity_weights,       # [N, K]
-        "retrieval_summary": retrieval_summary,         # [N, H]
-        "neighbor_external_codes": neighbor_codes,      # [N, K] object array or None
+        "query_sales": sales_tensor,                # [N, H]
+        "neighbor_sales": neighbor_sales,           # [N, K, H]
+        "topk_scores": topk_scores,                 # [N, K]
+        "topk_indices": topk_indices,               # [N, K]
+        "topk_valid_mask": topk_valid_mask,         # [N, K]
+        "similarity_weights": similarity_weights,   # [N, K]
+        "retrieval_curve": retrieval_curve,         # [N, H]
+        "retrieval_available": retrieval_available, # [N]
+        "neighbor_external_codes": neighbor_codes,  # [N, K] object array or None
         "metadata": metadata,
         "sales_columns": sales_cols,
         "horizon": args.horizon,
@@ -290,8 +232,8 @@ def main():
 
     print(f"Saved retrieval memory to: {output_path}")
     print(f"neighbor_sales shape: {tuple(neighbor_sales.shape)}")
-    print(f"retrieval_summary shape: {tuple(retrieval_summary.shape)}")
-    print(f"Queries with zero valid neighbors: {int((~topk_valid_mask).all(dim=1).sum().item())}")
+    print(f"retrieval_curve shape: {tuple(retrieval_curve.shape)}")
+    print(f"Queries with zero valid neighbors: {int((~retrieval_available).sum().item())}")
 
 
 if __name__ == "__main__":

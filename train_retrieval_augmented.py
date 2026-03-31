@@ -17,19 +17,22 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 class RetrievalAugmentedDataset(Dataset):
-    """
-    Wraps the existing ZeroShotDataset output and adds retrieval_summary
-    aligned by external_code.
-    """
+    """Wrap the existing ZeroShotDataset output and add retrieval tensors aligned by external_code."""
 
-    def __init__(self, base_dataset, retrieval_tensor):
+    def __init__(self, base_dataset, retrieval_curve_tensor, retrieval_available_tensor):
         self.base_dataset = base_dataset
-        self.retrieval_tensor = retrieval_tensor
+        self.retrieval_curve_tensor = retrieval_curve_tensor
+        self.retrieval_available_tensor = retrieval_available_tensor
 
-        if len(self.base_dataset) != len(self.retrieval_tensor):
+        if len(self.base_dataset) != len(self.retrieval_curve_tensor):
             raise ValueError(
                 f"Length mismatch: base dataset has {len(self.base_dataset)} rows, "
-                f"retrieval tensor has {len(self.retrieval_tensor)} rows."
+                f"retrieval tensor has {len(self.retrieval_curve_tensor)} rows."
+            )
+        if len(self.base_dataset) != len(self.retrieval_available_tensor):
+            raise ValueError(
+                f"Length mismatch: base dataset has {len(self.base_dataset)} rows, "
+                f"retrieval availability tensor has {len(self.retrieval_available_tensor)} rows."
             )
 
     def __len__(self):
@@ -37,16 +40,15 @@ class RetrievalAugmentedDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.base_dataset[idx]
-        retrieval_summary = self.retrieval_tensor[idx]
-        return (*item, retrieval_summary)
+        retrieval_curve = self.retrieval_curve_tensor[idx]
+        retrieval_available = self.retrieval_available_tensor[idx]
+        return (*item, retrieval_curve, retrieval_available)
 
 
-def build_retrieval_tensor_for_dataframe(df, retrieval_memory):
-    """
-    Align retrieval summaries to a dataframe using external_code.
-    """
+def build_retrieval_tensors_for_dataframe(df, retrieval_memory):
     metadata = retrieval_memory["metadata"]
-    retrieval_summary = retrieval_memory["retrieval_summary"]
+    retrieval_curve = retrieval_memory["retrieval_curve"]
+    retrieval_available = retrieval_memory["retrieval_available"]
 
     if "external_code" not in df.columns:
         raise KeyError("Input dataframe must contain 'external_code'.")
@@ -66,19 +68,16 @@ def build_retrieval_tensor_for_dataframe(df, retrieval_memory):
     if merged["retrieval_row"].isna().any():
         missing_codes = merged.loc[merged["retrieval_row"].isna(), "external_code"].tolist()
         raise ValueError(
-            f"Missing retrieval summary for {len(missing_codes)} products. "
+            f"Missing retrieval data for {len(missing_codes)} products. "
             f"Examples: {missing_codes[:10]}"
         )
 
     row_idx = torch.tensor(merged["retrieval_row"].astype(int).values, dtype=torch.long)
-    return retrieval_summary[row_idx]
+    return retrieval_curve[row_idx], retrieval_available[row_idx]
 
 
 def build_loader_with_retrieval(df, img_root, gtrends, cat_dict, col_dict, fab_dict,
                                 trend_len, retrieval_memory, batch_size, train):
-    """
-    Build the original ZeroShotDataset, then augment it with retrieval summaries.
-    """
     df_for_dataset = df.copy()
 
     zero_shot_dataset = ZeroShotDataset(
@@ -88,21 +87,22 @@ def build_loader_with_retrieval(df, img_root, gtrends, cat_dict, col_dict, fab_d
         cat_dict,
         col_dict,
         fab_dict,
-        trend_len
+        trend_len,
     ).preprocess_data()
 
-    retrieval_tensor = build_retrieval_tensor_for_dataframe(df, retrieval_memory)
+    retrieval_curve_tensor, retrieval_available_tensor = build_retrieval_tensors_for_dataframe(df, retrieval_memory)
 
     augmented_dataset = RetrievalAugmentedDataset(
         base_dataset=zero_shot_dataset,
-        retrieval_tensor=retrieval_tensor
+        retrieval_curve_tensor=retrieval_curve_tensor,
+        retrieval_available_tensor=retrieval_available_tensor,
     )
 
     return DataLoader(
         augmented_dataset,
         batch_size=batch_size if train else 1,
         shuffle=train,
-        num_workers=2
+        num_workers=2,
     )
 
 
@@ -110,25 +110,17 @@ def run(args):
     print(args)
     pl.seed_everything(args.seed)
 
-    # Load training data
     train_df = pd.read_csv(Path(args.data_folder) / "train.csv", parse_dates=["release_date"])
-
-    # Sort by release date and create subtrain / val split
     train_df = train_df.sort_values("release_date").reset_index(drop=True)
 
     val_size = max(1, int(0.15 * len(train_df)))
     subtrain_df = train_df.iloc[:-val_size].copy()
     val_df = train_df.iloc[-val_size:].copy()
 
-    # Load label encodings
     cat_dict = torch.load(Path(args.data_folder) / "category_labels.pt", weights_only=False)
     col_dict = torch.load(Path(args.data_folder) / "color_labels.pt", weights_only=False)
     fab_dict = torch.load(Path(args.data_folder) / "fabric_labels.pt", weights_only=False)
-
-    # Load Google Trends
     gtrends = pd.read_csv(Path(args.data_folder) / "gtrends.csv", index_col=[0], parse_dates=True)
-
-    # Load retrieval memory
     retrieval_memory = torch.load(args.retrieval_memory_path, map_location="cpu", weights_only=False)
 
     img_root = Path(args.data_folder) / "images"
